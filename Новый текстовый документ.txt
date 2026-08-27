@@ -1,0 +1,1363 @@
+/**
+ * COSMOS X — Main Application
+ * Central controller: bootstraps all systems, runs the simulation loop
+ */
+
+import * as THREE from 'three';
+import { CosmosRenderer } from './engine/renderer.js';
+import { PhysicsEngine, PhysicsBody } from './engine/physics.js';
+import { CelestialBodyFactory } from './objects/celestialBodies.js';
+import { EffectsEngine } from './effects/effects.js';
+import { UIManager } from './ui/uiManager.js';
+import { SOLAR_SYSTEM_DATA, SATELLITE_DATA, AU_TO_RENDER } from './data/solarSystem.js';
+
+// =============================================
+// UNIT CONVERSION HELPERS
+// Simulation (km) → Render (Three.js units)
+// =============================================
+const KM_PER_AU = 149597870.7;
+const RENDER_PER_AU = AU_TO_RENDER; // 30 Three.js units per AU
+
+function kmToRender(km) {
+  return (km / KM_PER_AU) * RENDER_PER_AU;
+}
+
+function renderToKm(r) {
+  return (r / RENDER_PER_AU) * KM_PER_AU;
+}
+
+// =============================================
+// COSMOS X — Main Application Class
+// =============================================
+class CosmosX {
+  constructor() {
+    this.canvas = document.getElementById('cosmos-canvas');
+    this.loadingBar = document.getElementById('loading-bar');
+    this.loadingStatus = document.getElementById('loading-status');
+    this.loadingScreen = document.getElementById('loading-screen');
+
+    // Systems
+    this.renderer = null;
+    this.physics = null;
+    this.factory = null;
+    this.effects = null;
+    this.ui = null;
+
+    // State
+    this.orbitalBodies = new Map(); // id -> { data, physBody, mesh, orbitLine }
+    this.satellites = new Map();   // id -> { data, mesh, orbitLine }
+    this.selectedId = null;
+    this.selectedMesh = null;
+    this.isDragging = false;
+    this.dragBody = null;
+    this.dragPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+    this.mousePos = new THREE.Vector2();
+    this.lastMouse = { x: 0, y: 0 };
+
+    // Grid
+    this.gridHelper = null;
+    this.orbitLinesVisible = true;
+
+    // Performance
+    this.frameCount = 0;
+    this.lastFPSTime = 0;
+    this.fps = 60;
+    this.lastTime = 0;
+
+    // Simulation clock
+    this.simTime = 0;
+    this.startTime = Date.now();
+
+    this.init();
+  }
+
+  // =============================================
+  // INITIALIZATION
+  // =============================================
+  async init() {
+    try {
+      this._setLoading('Initializing renderer...', 5);
+      await this._sleep(30);
+
+      // Initialize renderer
+      this.renderer = new CosmosRenderer(this.canvas);
+
+      this._setLoading('Building physics engine...', 15);
+      await this._sleep(30);
+
+      // Initialize physics
+      this.physics = new PhysicsEngine();
+      this.physics.timeScale = 86400; // Default: 1 real second = 1 simulation day
+
+      this._setLoading('Creating celestial factory...', 25);
+      await this._sleep(30);
+
+      // Initialize factory
+      this.factory = new CelestialBodyFactory(this.renderer.scene);
+
+      // Initialize effects
+      this.effects = new EffectsEngine(this.renderer.scene, this.renderer.renderer);
+
+      this._setLoading('Building solar system...', 35);
+      await this._sleep(50);
+
+      // Build solar system
+      this._buildSolarSystem();
+
+      this._setLoading('Placing satellites...', 60);
+      await this._sleep(50);
+
+      // Build satellites
+      this._buildSatellites();
+
+      this._setLoading('Creating starfield...', 72);
+      await this._sleep(30);
+
+      // Starfield and Milky Way
+      this.factory.createStarfield();
+      this.factory.createMilkyWay();
+
+      this._setLoading('Initializing UI...', 85);
+      await this._sleep(30);
+
+      // Initialize UI (AFTER bodies are created)
+      this.ui = new UIManager(this);
+      this.ui.updateObjectList();
+      this.ui.updateSatelliteList();
+
+      this._setLoading('Setting up input...', 92);
+      await this._sleep(30);
+
+      // Input
+      this._initInput();
+      this._initKeyboard();
+
+      this._setLoading('Ready!', 100);
+      await this._sleep(150);
+    } catch (err) {
+      console.error('COSMOS X Init warning/recovery:', err);
+    } finally {
+      // Ensure loading screen is ALWAYS dismissed and animation starts
+      if (this.loadingScreen) {
+        this.loadingScreen.classList.add('fade-out');
+        setTimeout(() => {
+          this.loadingScreen.style.display = 'none';
+        }, 800);
+      }
+      this._animate();
+    }
+  }
+
+  // =============================================
+  // SOLAR SYSTEM BUILDER
+  // =============================================
+  _buildSolarSystem() {
+    const G_KM = 6.674e-20;
+
+    // 1. CREATE SUN
+    const sunData = SOLAR_SYSTEM_DATA.sun;
+    const sunMesh = this.factory.createSun(new THREE.Vector3(0, 0, 0));
+
+    const sunPhys = new PhysicsBody({
+      id: 'sun',
+      name: 'Sun',
+      type: 'star',
+      mass: sunData.mass,
+      radius: sunData.radius,
+      px: 0, py: 0, pz: 0,
+      vx: 0, vy: 0, vz: 0,
+      isStatic: true,
+      rotationPeriod: sunData.rotationPeriod,
+    });
+    this.physics.addBody(sunPhys);
+
+    this.orbitalBodies.set('sun', {
+      id: 'sun',
+      data: sunData,
+      physBody: sunPhys,
+      mesh: sunMesh,
+      orbitLine: null,
+    });
+    this.ui && this.ui.createLabel('sun', 'Sun', sunMesh);
+
+    // 2. PLANETS & MOONS
+    const mainPlanets = ['mercury', 'venus', 'earth', 'mars', 'jupiter', 'saturn', 'uranus', 'neptune', 'pluto'];
+    const moons = {
+      earth: ['moon'],
+      mars: ['phobos', 'deimos'],
+      jupiter: ['io', 'europa', 'ganymede', 'callisto'],
+      saturn: ['titan', 'enceladus'],
+    };
+
+    for (const pKey of mainPlanets) {
+      this._addPlanet(pKey, 'sun', sunData);
+      if (moons[pKey]) {
+        for (const mKey of moons[pKey]) {
+          this._addMoon(mKey, pKey);
+        }
+      }
+    }
+
+    // 3. ASTEROID FIELD (procedural, lightweight)
+    this._buildAsteroidBelt();
+  }
+
+  _addPlanet(key, parentId, parentData) {
+    const data = SOLAR_SYSTEM_DATA[key];
+    if (!data) return;
+
+    const G_KM = 6.674e-20;
+
+    // Convert orbital elements to simulation state
+    // Semi-major axis in km, but we need positions in km for physics
+    const sma_km = data.semiMajorAxis; // km
+    const ecc = data.eccentricity || 0;
+    const inc = (data.inclination || 0) * Math.PI / 180; // radians
+    const raan = Math.random() * Math.PI * 2; // Random longitude of ascending node
+    const argP = Math.random() * Math.PI * 2; // Random argument of periapsis
+    const ta = Math.random() * Math.PI * 2;   // Random true anomaly (randomize start position)
+
+    let state;
+    try {
+      state = this.physics.keplerToState(sma_km, ecc, inc, raan, argP, ta, parentData.mass);
+    } catch (e) {
+      // Fallback to simple circular orbit
+      const v = Math.sqrt(G_KM * parentData.mass / sma_km);
+      state = { px: sma_km, py: 0, pz: 0, vx: 0, vy: v, vz: 0 };
+    }
+
+    // Physics body
+    const physBody = new PhysicsBody({
+      id: key,
+      name: data.name,
+      type: data.type,
+      mass: data.mass,
+      radius: data.radius,
+      px: state.px, py: state.py, pz: state.pz,
+      vx: state.vx, vy: state.vy, vz: state.vz,
+      rotationPeriod: data.rotationPeriod || 1,
+    });
+    this.physics.addBody(physBody);
+
+    // 3D position (convert km → render units)
+    const renderPos = new THREE.Vector3(
+      kmToRender(state.px),
+      kmToRender(state.py),
+      kmToRender(state.pz)
+    );
+
+    // Visual mesh
+    const mesh = this.factory.createPlanet(data, renderPos);
+
+    // Orbit line (around Sun)
+    let orbitColor;
+    switch (data.type) {
+      case 'planet': orbitColor = 0x223344; break;
+      case 'dwarf-planet': orbitColor = 0x332244; break;
+      default: orbitColor = 0x223344;
+    }
+    const orbitLine = this.factory.createOrbitLine(
+      new THREE.Vector3(0, 0, 0),
+      kmToRender(sma_km),
+      ecc,
+      inc,
+      orbitColor
+    );
+
+    this.orbitalBodies.set(key, {
+      id: key,
+      data,
+      physBody,
+      mesh,
+      orbitLine,
+    });
+
+    // Label
+    this.ui && this.ui.createLabel(key, data.name, mesh);
+
+    return physBody;
+  }
+
+  _addMoon(key, parentKey) {
+    const data = SOLAR_SYSTEM_DATA[key];
+    const parentData = SOLAR_SYSTEM_DATA[parentKey];
+    const parentBody = this.orbitalBodies.get(parentKey);
+    if (!data || !parentBody) return;
+
+    const G_KM = 6.674e-20;
+    const sma_km = data.semiMajorAxis;
+    const ecc = data.eccentricity || 0;
+    const inc = (data.inclination || 0) * Math.PI / 180;
+    const raan = Math.random() * Math.PI * 2;
+    const argP = Math.random() * Math.PI * 2;
+    const ta = Math.random() * Math.PI * 2;
+
+    let state;
+    try {
+      state = this.physics.keplerToState(sma_km, ecc, inc, raan, argP, ta, parentData.mass);
+    } catch (e) {
+      const v = Math.sqrt(G_KM * parentData.mass / sma_km);
+      state = { px: sma_km, py: 0, pz: 0, vx: 0, vy: v, vz: 0 };
+    }
+
+    // Moon position = parent position + local orbit
+    const parentPhys = parentBody.physBody;
+    const physBody = new PhysicsBody({
+      id: key,
+      name: data.name,
+      type: data.type,
+      mass: data.mass,
+      radius: data.radius,
+      px: parentPhys.position.x + state.px,
+      py: parentPhys.position.y + state.py,
+      pz: parentPhys.position.z + state.pz,
+      vx: parentPhys.velocity.x + state.vx,
+      vy: parentPhys.velocity.y + state.vy,
+      vz: parentPhys.velocity.z + state.vz,
+      rotationPeriod: data.rotationPeriod || 1,
+    });
+    this.physics.addBody(physBody);
+
+    // Render position
+    const renderPos = new THREE.Vector3(
+      kmToRender(physBody.position.x),
+      kmToRender(physBody.position.y),
+      kmToRender(physBody.position.z)
+    );
+
+    const mesh = this.factory.createPlanet(data, renderPos);
+
+    // Moon orbit line (relative to parent)
+    const parentRenderPos = new THREE.Vector3(
+      kmToRender(parentPhys.position.x),
+      kmToRender(parentPhys.position.y),
+      kmToRender(parentPhys.position.z)
+    );
+
+    const orbitLine = this.factory.createOrbitLine(
+      parentRenderPos,
+      kmToRender(sma_km),
+      ecc,
+      inc,
+      0x1a2a3a
+    );
+    orbitLine.position.copy(parentRenderPos);
+
+    this.orbitalBodies.set(key, {
+      id: key,
+      data,
+      physBody,
+      mesh,
+      orbitLine,
+      parentKey,
+    });
+
+    this.ui && this.ui.createLabel(key, data.name, mesh);
+  }
+
+  _buildAsteroidBelt() {
+    // Lightweight instanced asteroid belt between Mars and Jupiter
+    const count = 200;
+    const geo = new THREE.IcosahedronGeometry(0.02, 0);
+    const mat = new THREE.MeshStandardMaterial({ color: 0x665544, roughness: 0.95 });
+
+    const instancedMesh = new THREE.InstancedMesh(geo, mat, count);
+    instancedMesh.name = 'asteroid_belt';
+    instancedMesh.castShadow = false;
+    instancedMesh.receiveShadow = false;
+
+    const dummy = new THREE.Object3D();
+    for (let i = 0; i < count; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const dist = kmToRender((2.2e8 + Math.random() * 1.3e8)); // 2.2 to 3.5 AU
+      const height = (Math.random() - 0.5) * kmToRender(5e6);
+      const scale = 0.5 + Math.random() * 1.5;
+
+      dummy.position.set(
+        Math.cos(angle) * dist,
+        height,
+        Math.sin(angle) * dist
+      );
+      dummy.rotation.set(Math.random() * 6, Math.random() * 6, Math.random() * 6);
+      dummy.scale.setScalar(scale);
+      dummy.updateMatrix();
+      instancedMesh.setMatrixAt(i, dummy.matrix);
+    }
+    instancedMesh.instanceMatrix.needsUpdate = true;
+    this.renderer.scene.add(instancedMesh);
+    this.asteroidBelt = instancedMesh;
+  }
+
+  // =============================================
+  // SATELLITES
+  // =============================================
+  _buildSatellites() {
+    for (const satData of SATELLITE_DATA) {
+      this._addSatellite(satData);
+    }
+  }
+
+  _addSatellite(satData) {
+    const G_KM = 6.674e-20;
+
+    // Find parent body
+    const parentBody = this.orbitalBodies.get(satData.parent || 'earth');
+    const parentMass = parentBody ? parentBody.data.mass : 5.972e24;
+    const parentPhys = parentBody ? parentBody.physBody : null;
+
+    const altKm = satData.altitude || 400;
+    const earthRadius = 6371;
+    const smaKm = (satData.orbitType === 'L2') ? 1.5e9 :
+                  (earthRadius + altKm);
+
+    // Circular orbit around parent
+    const angle = Math.random() * Math.PI * 2;
+    const v = Math.sqrt(G_KM * parentMass / smaKm);
+    const inc = (satData.inclination || 0) * Math.PI / 180;
+
+    const px_local = smaKm * Math.cos(angle);
+    const pz_local = smaKm * Math.sin(angle) * Math.cos(inc);
+    const py_local = smaKm * Math.sin(angle) * Math.sin(inc);
+
+    const parentPx = parentPhys ? parentPhys.position.x : 0;
+    const parentPy = parentPhys ? parentPhys.position.y : 0;
+    const parentPz = parentPhys ? parentPhys.position.z : 0;
+
+    // Render position
+    const renderPos = new THREE.Vector3(
+      kmToRender(parentPx + px_local),
+      kmToRender(parentPy + py_local),
+      kmToRender(parentPz + pz_local)
+    );
+
+    const mesh = this.factory.createSatellite(satData, renderPos);
+    mesh.scale.setScalar(0.03); // Satellites are tiny relative to planets
+
+    // Orbit data for animation
+    const satEntry = {
+      id: 'satellite_' + satData.id,
+      data: satData,
+      mesh,
+      orbitAngle: angle,
+      orbitSmaKm: smaKm,
+      orbitInc: inc,
+      orbitVelocity: v,
+      parentKey: satData.parent || 'earth',
+    };
+
+    // Orbit line
+    if (parentBody) {
+      const parentRenderPos = new THREE.Vector3(
+        kmToRender(parentPx),
+        kmToRender(parentPy),
+        kmToRender(parentPz)
+      );
+      const orbitLine = this.factory.createOrbitLine(
+        parentRenderPos,
+        kmToRender(smaKm),
+        satData.eccentricity || 0,
+        inc,
+        0x2a3a1a
+      );
+      orbitLine.position.copy(parentRenderPos);
+      satEntry.orbitLine = orbitLine;
+    }
+
+    this.satellites.set('satellite_' + satData.id, satEntry);
+    return satEntry;
+  }
+
+  // =============================================
+  // ANIMATION LOOP
+  // =============================================
+  _animate() {
+    requestAnimationFrame(() => this._animate());
+
+    const now = performance.now();
+    const dt = Math.min((now - this.lastTime) / 1000, 0.05); // Cap at 50ms
+    this.lastTime = now;
+
+    // FPS counter
+    this.frameCount++;
+    if (now - this.lastFPSTime > 500) {
+      this.fps = this.frameCount / ((now - this.lastFPSTime) / 1000);
+      this.frameCount = 0;
+      this.lastFPSTime = now;
+      if (this.ui) this.ui.updateFPS(this.fps);
+    }
+
+    // Advance physics
+    if (!this.physics.paused) {
+      this.physics.step(dt);
+
+      // Process collision events
+      const events = this.physics._processCollisions();
+      for (const evt of events) {
+        this._handleCollisionEvent(evt);
+      }
+
+      // Update visual positions from physics
+      this._syncVisualsToPhysics();
+
+      // Update satellite orbits
+      this._updateSatelliteOrbits(dt);
+
+      // Rotate asteroid belt slowly
+      if (this.asteroidBelt) {
+        this.asteroidBelt.rotation.y += dt * 0.001;
+      }
+    }
+
+    // Update effects
+    this.effects.update(dt * 1000);
+
+    // Update visuals
+    const cameraPos = this.renderer.camera.position;
+    const sunPos = new THREE.Vector3(0, 0, 0);
+    this.factory.update(now * 0.001, cameraPos, sunPos);
+
+    // Update sun light position
+    if (this.orbitalBodies.has('sun')) {
+      const sunMesh = this.orbitalBodies.get('sun').mesh;
+      this.renderer.setSunPosition(sunMesh.position);
+    }
+
+    // Update labels
+    if (this.ui) {
+      this.ui.updateLabels(this.renderer.camera, this.renderer.renderer);
+      this.ui.updateBottomBar(this.physics, this.renderer.camera, this.orbitalBodies.size + this.satellites.size);
+    }
+
+    // Update drag
+    if (this.isDragging && this.dragBody) {
+      this._updateDrag();
+    }
+
+    // Render
+    this.renderer.render();
+  }
+
+  // =============================================
+  // SYNC PHYSICS → VISUALS
+  // =============================================
+  _syncVisualsToPhysics() {
+    this.orbitalBodies.forEach((entry, key) => {
+      if (!entry.physBody || !entry.mesh) return;
+      const phys = entry.physBody;
+
+      if (phys.destroyed) {
+        // Handle destruction
+        this.factory.removeBody(key);
+        if (entry.orbitLine) this.renderer.scene.remove(entry.orbitLine);
+        if (this.ui) this.ui.removeLabel(key);
+        this.orbitalBodies.delete(key);
+        return;
+      }
+
+      // Update position
+      entry.mesh.position.set(
+        kmToRender(phys.position.x),
+        kmToRender(phys.position.y),
+        kmToRender(phys.position.z)
+      );
+
+      // Update rotation
+      entry.mesh.rotation.y = phys.rotationAngle;
+
+      // Update moon orbit lines to follow parent
+      if (entry.parentKey) {
+        const parentEntry = this.orbitalBodies.get(entry.parentKey);
+        if (parentEntry && entry.orbitLine) {
+          entry.orbitLine.position.set(
+            kmToRender(parentEntry.physBody.position.x),
+            kmToRender(parentEntry.physBody.position.y),
+            kmToRender(parentEntry.physBody.position.z)
+          );
+        }
+      }
+    });
+  }
+
+  _updateSatelliteOrbits(dt) {
+    this.satellites.forEach((sat) => {
+      const parentEntry = this.orbitalBodies.get(sat.parentKey);
+      if (!parentEntry) return;
+
+      const parentPhys = parentEntry.physBody;
+      const v = sat.orbitVelocity; // km/s
+      const r = sat.orbitSmaKm;   // km
+
+      // Angular velocity
+      const omega = v / r; // rad/s
+      sat.orbitAngle += omega * dt * this.physics.timeScale;
+
+      const px = r * Math.cos(sat.orbitAngle);
+      const py = r * Math.sin(sat.orbitAngle) * Math.sin(sat.orbitInc);
+      const pz = r * Math.sin(sat.orbitAngle) * Math.cos(sat.orbitInc);
+
+      sat.mesh.position.set(
+        kmToRender(parentPhys.position.x + px),
+        kmToRender(parentPhys.position.y + py),
+        kmToRender(parentPhys.position.z + pz)
+      );
+
+      // Track orbit line with parent
+      if (sat.orbitLine) {
+        sat.orbitLine.position.set(
+          kmToRender(parentPhys.position.x),
+          kmToRender(parentPhys.position.y),
+          kmToRender(parentPhys.position.z)
+        );
+      }
+    });
+  }
+
+  // =============================================
+  // COLLISION EVENT HANDLING
+  // =============================================
+  _handleCollisionEvent(evt) {
+    if (evt.type === 'collision') {
+      const posRender = new THREE.Vector3(
+        kmToRender(evt.impactPoint.x),
+        kmToRender(evt.impactPoint.y),
+        kmToRender(evt.impactPoint.z)
+      );
+
+      this.effects.triggerCollisionExplosion(posRender, evt.bodyA.kineticEnergy());
+
+      // Merge or destroy
+      const totalMass = evt.bodyA.mass + evt.bodyB.mass;
+      const impactEnergy = 0.5 * (evt.bodyA.mass * evt.bodyB.mass / totalMass) * Math.pow(evt.relativeVelocity, 2);
+
+      if (impactEnergy > 1e35) {
+        // Destructive collision
+        this.physics.destroyBody(evt.bodyA.id);
+        this.physics.destroyBody(evt.bodyB.id);
+        this.effects.createDebrisField(posRender, 30, 2);
+        if (this.ui) this.ui.showToast(`${evt.bodyA.name} destroyed in collision!`, 'error');
+      } else {
+        // Merger
+        const merged = this.physics.mergeBodies(evt.bodyA.id, evt.bodyB.id);
+        if (merged) {
+          // Remove smaller body's visual
+          const smaller = evt.bodyA.mass < evt.bodyB.mass ? evt.bodyA : evt.bodyB;
+          this.factory.removeBody(smaller.id);
+          if (this.ui) {
+            this.ui.removeLabel(smaller.id);
+            this.ui.showToast(`${evt.bodyA.name} merged with ${evt.bodyB.name}`, 'info');
+          }
+        }
+        evt.bodyA.destroyed = false;
+        evt.bodyB.destroyed = false;
+      }
+    } else if (evt.type === 'blackhole_absorb') {
+      const bh = evt.blackhole;
+      const victim = evt.victim;
+      bh.mass += victim.mass;
+      bh.schwarzschildRadius = bh.computeSchwarzschildRadius();
+
+      this.physics.removeBody(victim.id);
+      this.factory.removeBody(victim.id);
+      if (this.ui) {
+        this.ui.removeLabel(victim.id);
+        this.ui.showToast(`${victim.name} absorbed by black hole!`, 'error');
+      }
+
+      // Grow black hole mesh
+      const bhEntry = this.orbitalBodies.get(bh.id);
+      if (bhEntry && bhEntry.mesh) {
+        bhEntry.mesh.scale.multiplyScalar(1.1);
+      }
+    }
+  }
+
+  // =============================================
+  // INPUT
+  // =============================================
+  _initInput() {
+    const canvas = this.canvas;
+
+    // Mouse click — select
+    canvas.addEventListener('click', (e) => {
+      if (this.isDragging) return;
+      const hits = this.renderer.raycast(e.clientX, e.clientY, this.factory.getPickableObjects());
+      if (hits.length > 0) {
+        const hit = hits[0];
+        const group = hit.object.userData.parentGroup;
+        if (group) {
+          const id = group.userData.id || group.name;
+          this.selectBody(id);
+        }
+      } else {
+        this.deselectAll();
+      }
+    });
+
+    // Double click — focus
+    canvas.addEventListener('dblclick', (e) => {
+      const hits = this.renderer.raycast(e.clientX, e.clientY, this.factory.getPickableObjects());
+      if (hits.length > 0) {
+        const group = hits[0].object.userData.parentGroup;
+        if (group) {
+          this.renderer.flyToTarget(group);
+        }
+      }
+    });
+
+    // Right click — context menu
+    canvas.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      const hits = this.renderer.raycast(e.clientX, e.clientY, this.factory.getPickableObjects());
+      if (hits.length > 0) {
+        const group = hits[0].object.userData.parentGroup;
+        const id = group ? (group.userData.id || group.name) : null;
+        if (id) {
+          const entry = this.orbitalBodies.get(id) || this.satellites.get(id);
+          if (entry) {
+            this.selectedId = id;
+            this.ui.selectedBody = entry;
+            this.ui.showContextMenu(e.clientX, e.clientY, entry);
+          }
+        }
+      }
+    });
+
+    // Mouse move
+    canvas.addEventListener('mousemove', (e) => {
+      this.mousePos.set(e.clientX, e.clientY);
+    });
+
+    // Mouse drag — grab and throw
+    canvas.addEventListener('mousedown', (e) => {
+      if (e.button === 0 && e.shiftKey) {
+        // Shift+drag = grab body
+        const hits = this.renderer.raycast(e.clientX, e.clientY, this.factory.getPickableObjects());
+        if (hits.length > 0) {
+          const group = hits[0].object.userData.parentGroup;
+          if (group) {
+            const id = group.userData.id || group.name;
+            const entry = this.orbitalBodies.get(id);
+            if (entry && entry.physBody && !entry.physBody.isStatic) {
+              this.isDragging = true;
+              this.dragBody = entry;
+              this.renderer.controls.enabled = false;
+              this.lastMouse = { x: e.clientX, y: e.clientY };
+              e.stopPropagation();
+            }
+          }
+        }
+      }
+    });
+
+    canvas.addEventListener('mousemove', (e) => {
+      if (!this.isDragging || !this.dragBody) return;
+
+      // Project to world space on Y=0 plane
+      const raycaster = new THREE.Raycaster();
+      const mouseVec = new THREE.Vector2(
+        (e.clientX / window.innerWidth) * 2 - 1,
+        -(e.clientY / window.innerHeight) * 2 + 1
+      );
+      raycaster.setFromCamera(mouseVec, this.renderer.camera);
+
+      const target = new THREE.Vector3();
+      raycaster.ray.intersectPlane(this.dragPlane, target);
+
+      if (target) {
+        // Update physics position
+        this.dragBody.physBody.position.x = renderToKm(target.x);
+        this.dragBody.physBody.position.y = renderToKm(target.y);
+        this.dragBody.physBody.position.z = renderToKm(target.z);
+
+        const now = performance.now();
+        if (this._lastDragPos && this._lastDragTime) {
+          const dtSec = Math.max((now - this._lastDragTime) / 1000, 0.001);
+          const dxKm = renderToKm(target.x - this._lastDragPos.x);
+          const dyKm = renderToKm(target.y - this._lastDragPos.y);
+          const dzKm = renderToKm(target.z - this._lastDragPos.z);
+
+          // Physical velocity in km/s (scaled for intuitive gameplay)
+          this._throwVelX = (dxKm / dtSec) * 0.05;
+          this._throwVelY = (dyKm / dtSec) * 0.05;
+          this._throwVelZ = (dzKm / dtSec) * 0.05;
+        }
+        this._lastDragPos = target.clone();
+        this._lastDragTime = now;
+      }
+    });
+
+    canvas.addEventListener('mouseup', (e) => {
+      if (this.isDragging && this.dragBody) {
+        // Apply 3D throw velocity
+        this.dragBody.physBody.velocity.x = this._throwVelX || 0;
+        this.dragBody.physBody.velocity.y = this._throwVelY || 0;
+        this.dragBody.physBody.velocity.z = this._throwVelZ || 0;
+        this.ui?.showToast(`Threw ${this.dragBody.data.name}! Speed: ${this.dragBody.physBody.speed().toFixed(1)} km/s`, 'info');
+        this.isDragging = false;
+        this.dragBody = null;
+        this._throwVelX = 0;
+        this._throwVelY = 0;
+        this._throwVelZ = 0;
+        this._lastDragPos = null;
+      }
+      this.renderer.controls.enabled = true;
+    });
+  }
+
+  _initKeyboard() {
+    document.addEventListener('keydown', (e) => {
+      // Don't capture if in input
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+
+      switch (e.key) {
+        case ' ':
+          e.preventDefault();
+          this.togglePause();
+          break;
+        case '1':
+          this.setTimeScale(1);
+          break;
+        case '2':
+          this.setTimeScale(10);
+          break;
+        case '3':
+          this.setTimeScale(100);
+          break;
+        case '4':
+          this.setTimeScale(1000);
+          break;
+        case '5':
+          this.setTimeScale(10000);
+          break;
+        case 'f':
+        case 'F':
+          if (this.selectedId) this.focusBodyById(this.selectedId);
+          break;
+        case 'Delete':
+          if (this.selectedId) this.deleteBody(this.selectedId);
+          break;
+        case 'g':
+        case 'G':
+          this.spawnObject('planet');
+          break;
+        case 'b':
+        case 'B':
+          this.spawnObject('blackhole');
+          break;
+        case 's':
+        case 'S':
+          if (this.selectedId) this.triggerSupernova(this.orbitalBodies.get(this.selectedId));
+          break;
+        case 'Escape':
+          this.deselectAll();
+          if (this.ui) this.ui.closeInspector();
+          break;
+      }
+    });
+  }
+
+  // =============================================
+  // SELECTION
+  // =============================================
+  selectBody(id) {
+    this.deselectAll();
+    this.selectedId = id;
+
+    const entry = this.orbitalBodies.get(id) || this.satellites.get(id);
+    if (!entry) return;
+
+    this.selectedMesh = entry.mesh;
+
+    // Add selection ring
+    if (entry.mesh && entry.mesh.userData.renderRadius) {
+      const ring = this.factory.createSelectionRing(entry.mesh);
+      entry.mesh.add(ring);
+      entry._selectionRing = ring;
+    }
+
+    // Show inspector
+    if (this.ui) {
+      this.ui.showInspector(entry);
+      this.ui.highlightSelected(id);
+    }
+  }
+
+  deselectAll() {
+    if (this.selectedId) {
+      const entry = this.orbitalBodies.get(this.selectedId) || this.satellites.get(this.selectedId);
+      if (entry && entry._selectionRing && entry.mesh) {
+        entry.mesh.remove(entry._selectionRing);
+        entry._selectionRing = null;
+      }
+    }
+    this.selectedId = null;
+    this.selectedMesh = null;
+  }
+
+  selectAndFocusById(id) {
+    this.selectBody(id);
+    this.focusBodyById(id);
+  }
+
+  focusBody(entry) {
+    if (entry && entry.mesh) {
+      this.renderer.flyToTarget(entry.mesh);
+    }
+  }
+
+  focusBodyById(id) {
+    const entry = this.orbitalBodies.get(id) || this.satellites.get(id);
+    if (entry) this.focusBody(entry);
+  }
+
+  // =============================================
+  // SPAWN
+  // =============================================
+  spawnObject(type) {
+    // Spawn near camera
+    const camPos = this.renderer.camera.position.clone();
+    const offset = new THREE.Vector3(
+      (Math.random() - 0.5) * 20,
+      0,
+      (Math.random() - 0.5) * 20
+    );
+    const spawnPos = camPos.add(offset);
+
+    switch (type) {
+      case 'planet': {
+        const id = 'spawned_planet_' + Date.now();
+        const mass = 1e24 * (0.1 + Math.random() * 10);
+        const radius = 1000 + Math.random() * 50000;
+        const color = new THREE.Color().setHSL(Math.random(), 0.7, 0.5);
+
+        const physBody = new PhysicsBody({
+          id,
+          name: 'New Planet',
+          type: 'planet',
+          mass,
+          radius,
+          px: renderToKm(spawnPos.x),
+          py: renderToKm(spawnPos.y),
+          pz: renderToKm(spawnPos.z),
+          vx: (Math.random() - 0.5) * 10,
+          vy: 0,
+          vz: (Math.random() - 0.5) * 10,
+        });
+        this.physics.addBody(physBody);
+
+        const data = {
+          name: 'New Planet',
+          type: 'planet',
+          icon: '🪐',
+          mass,
+          radius,
+          color: color.getHex(),
+        };
+        const mesh = this.factory.createPlanet(data, spawnPos);
+        this.orbitalBodies.set(id, { id, data, physBody, mesh });
+        if (this.ui) this.ui.createLabel(id, 'New Planet', mesh);
+        this.ui?.showToast('Planet spawned!', 'success');
+        break;
+      }
+
+      case 'blackhole': {
+        const id = 'blackhole_' + Date.now();
+        const mass = 1e30 * (10 + Math.random() * 990);
+        const mesh = this.factory.createBlackHole(spawnPos, mass);
+
+        const physBody = new PhysicsBody({
+          id,
+          name: 'Black Hole',
+          type: 'black-hole',
+          mass,
+          radius: 100,
+          px: renderToKm(spawnPos.x),
+          py: renderToKm(spawnPos.y),
+          pz: renderToKm(spawnPos.z),
+          isBlackHole: true,
+        });
+        this.physics.addBody(physBody);
+        this.orbitalBodies.set(id, {
+          id, data: { name: 'Black Hole', type: 'black-hole', icon: '⚫', mass },
+          physBody, mesh,
+        });
+        this.ui?.showToast('Black Hole created!', 'error');
+        break;
+      }
+
+      case 'asteroid': {
+        const pos = spawnPos.clone().add(new THREE.Vector3(
+          (Math.random() - 0.5) * 30,
+          (Math.random() - 0.5) * 5,
+          (Math.random() - 0.5) * 30
+        ));
+        const mesh = this.factory.createAsteroid(pos);
+        this.ui?.showToast('Asteroid spawned!', 'info');
+        break;
+      }
+
+      case 'comet': {
+        const mesh = this.factory.createComet(spawnPos);
+        this.ui?.showToast('Comet spawned!', 'info');
+        break;
+      }
+
+      case 'star': {
+        const id = 'star_' + Date.now();
+        const mass = 1e30 * (0.5 + Math.random() * 50);
+        const starData = {
+          name: 'New Star',
+          type: 'star',
+          icon: '⭐',
+          mass,
+          radius: 500000,
+          temperature: 4000 + Math.random() * 30000,
+          color: 0xFFEEAA,
+        };
+        const mesh = this.factory.createSun(spawnPos);
+        const physBody = new PhysicsBody({
+          id, name: 'New Star', type: 'star', mass, radius: 500000,
+          px: renderToKm(spawnPos.x), py: renderToKm(spawnPos.y), pz: renderToKm(spawnPos.z),
+        });
+        this.physics.addBody(physBody);
+        this.orbitalBodies.set(id, { id, data: starData, physBody, mesh });
+        this.ui?.showToast('Star spawned!', 'success');
+        break;
+      }
+
+      case 'galaxy':
+        this.generateGalaxy({ position: spawnPos.clone().add(new THREE.Vector3(0, 0, -200)) });
+        break;
+
+      default:
+        this.ui?.showToast('Spawning: ' + type, 'info');
+    }
+
+    if (this.ui) this.ui.updateObjectList();
+  }
+
+  // =============================================
+  // EFFECTS
+  // =============================================
+  triggerSupernova(entry) {
+    if (!entry || !entry.mesh) {
+      this.ui?.showToast('Select a star to trigger supernova', 'info');
+      return;
+    }
+    const pos = entry.mesh.position.clone();
+
+    // Remove the star visually after a moment
+    setTimeout(() => {
+      if (entry.mesh) {
+        this.renderer.scene.remove(entry.mesh);
+        this.factory.bodies.delete(entry.id);
+      }
+      this.physics.removeBody(entry.id);
+      this.orbitalBodies.delete(entry.id);
+      if (this.ui) {
+        this.ui.removeLabel(entry.id);
+        this.ui.updateObjectList();
+      }
+
+      // Create remnant neutron star
+      const remnantPos = pos.clone();
+      const remnantMesh = this.factory.createBlackHole(remnantPos, 2e30);
+      const remnantId = 'remnant_' + Date.now();
+      const physBody = new PhysicsBody({
+        id: remnantId, name: 'Neutron Star', type: 'star', mass: 2e30, radius: 10,
+        px: renderToKm(remnantPos.x), py: renderToKm(remnantPos.y), pz: renderToKm(remnantPos.z),
+      });
+      this.physics.addBody(physBody);
+      this.orbitalBodies.set(remnantId, {
+        id: remnantId,
+        data: { name: 'Neutron Star', type: 'star', icon: '✨', mass: 2e30 },
+        physBody, mesh: remnantMesh,
+      });
+    }, 2000);
+
+    this.effects.triggerSupernova(pos, entry.data.mass, () => {
+      this.ui?.showToast('Supernova complete! Neutron star remnant formed.', 'success');
+    });
+
+    // Bloom burst
+    const origStrength = this.renderer.bloomPass.strength;
+    this.renderer.bloomPass.strength = 8;
+    setTimeout(() => {
+      this.renderer.bloomPass.strength = origStrength;
+    }, 1000);
+
+    this.ui?.showToast('Supernova triggered!', 'error');
+    if (this.ui) this.ui.updateObjectList();
+  }
+
+  convertToBlackHole(entry) {
+    if (!entry || !entry.physBody) return;
+
+    this.physics.convertToBlackHole(entry.id);
+    const pos = entry.mesh.position.clone();
+    const mass = entry.physBody.mass;
+
+    // Replace mesh
+    this.renderer.scene.remove(entry.mesh);
+    this.factory.bodies.delete(entry.id);
+    const newMesh = this.factory.createBlackHole(pos, mass);
+    entry.mesh = newMesh;
+    this.factory.bodies.set(entry.id, newMesh);
+
+    entry.data.type = 'black-hole';
+    entry.data.name = entry.data.name + ' (Black Hole)';
+
+    this.effects.triggerCollisionExplosion(pos, mass);
+    this.ui?.showToast(`${entry.data.name} converted to black hole!`, 'error');
+    if (this.ui) this.ui.updateObjectList();
+  }
+
+  destroyPlanet(entry) {
+    if (!entry || !entry.physBody) return;
+    const pos = entry.mesh ? entry.mesh.position.clone() : new THREE.Vector3();
+
+    this.effects.triggerCollisionExplosion(pos, entry.physBody.kineticEnergy() + 1e30);
+    this.effects.createDebrisField(pos, 40, 3);
+
+    this.physics.removeBody(entry.id);
+    if (entry.mesh) {
+      this.renderer.scene.remove(entry.mesh);
+      this.factory.bodies.delete(entry.id);
+    }
+    if (entry.orbitLine) this.renderer.scene.remove(entry.orbitLine);
+    this.orbitalBodies.delete(entry.id);
+    this.ui?.removeLabel(entry.id);
+    this.ui?.showToast(`${entry.data.name} destroyed!`, 'error');
+    if (this.ui) this.ui.updateObjectList();
+    this.deselectAll();
+  }
+
+  deleteBody(id) {
+    const entry = this.orbitalBodies.get(id) || this.satellites.get(id);
+    if (!entry) return;
+
+    this.physics.removeBody(id);
+    if (entry.mesh) this.renderer.scene.remove(entry.mesh);
+    if (entry.orbitLine) this.renderer.scene.remove(entry.orbitLine);
+    this.orbitalBodies.delete(id);
+    this.satellites.delete(id);
+    this.ui?.removeLabel(id);
+    this.ui?.showToast('Object deleted', 'info');
+    if (this.ui) this.ui.updateObjectList();
+    this.deselectAll();
+  }
+
+  triggerAsteroidStorm() {
+    const pos = new THREE.Vector3(0, 0, 0);
+    this.effects.createAsteroidStorm(pos, 20);
+    this.ui?.showToast('Asteroid storm incoming!', 'error');
+  }
+
+  triggerCometShower() {
+    for (let i = 0; i < 5; i++) {
+      setTimeout(() => {
+        const pos = new THREE.Vector3(
+          (Math.random() - 0.5) * 200,
+          (Math.random() - 0.5) * 10,
+          (Math.random() - 0.5) * 200
+        );
+        this.factory.createComet(pos);
+      }, i * 500);
+    }
+    this.ui?.showToast('Comet shower!', 'info');
+  }
+
+  resetOrbits() {
+    // Rebuild solar system
+    this.ui?.showToast('Resetting orbits...', 'info');
+    // Simply rebuild all orbit lines
+    this.orbitalBodies.forEach((entry) => {
+      if (entry.orbitLine) this.renderer.scene.remove(entry.orbitLine);
+    });
+    this.ui?.showToast('Orbits reset', 'success');
+  }
+
+  generateGalaxy(opts = {}) {
+    const galaxy = this.effects.generateGalaxy(opts);
+    this.ui?.showToast(`Galaxy generated!`, 'success');
+    return galaxy;
+  }
+
+  // =============================================
+  // PLAYBACK CONTROL
+  // =============================================
+  togglePause() {
+    this.physics.paused = !this.physics.paused;
+    const btn = document.getElementById('btn-pause');
+    if (btn) {
+      btn.textContent = this.physics.paused ? '▶' : '⏸';
+      btn.title = this.physics.paused ? 'Play' : 'Pause';
+    }
+    this.ui?.showToast(this.physics.paused ? 'Paused' : 'Playing', 'info');
+  }
+
+  setPlaying(playing) {
+    this.physics.paused = !playing;
+  }
+
+  setTimeScale(scale) {
+    // Convert multiplier to physics time scale (days per second)
+    this.physics.timeScale = scale * 86400;
+    document.querySelectorAll('.speed-btn').forEach(btn => {
+      btn.classList.toggle('active', parseFloat(btn.dataset.speed) === scale);
+    });
+  }
+
+  // =============================================
+  // VISUAL TOGGLES
+  // =============================================
+  setOrbitLinesVisible(visible) {
+    this.orbitalBodies.forEach(entry => {
+      if (entry.orbitLine) entry.orbitLine.visible = visible;
+    });
+    this.satellites.forEach(sat => {
+      if (sat.orbitLine) sat.orbitLine.visible = visible;
+    });
+  }
+
+  setAtmosphereVisible(visible) {
+    this.renderer.scene.traverse(child => {
+      if (child.userData && child.userData.isAtmosphere) {
+        child.visible = visible;
+      }
+    });
+  }
+
+  toggleGrid(visible) {
+    if (visible && !this.gridHelper) {
+      this.gridHelper = new THREE.GridHelper(500, 50, 0x223344, 0x112233);
+      this.gridHelper.material.transparent = true;
+      this.gridHelper.material.opacity = 0.3;
+      this.renderer.scene.add(this.gridHelper);
+    } else if (!visible && this.gridHelper) {
+      this.renderer.scene.remove(this.gridHelper);
+      this.gridHelper = null;
+    }
+  }
+
+  // =============================================
+  // SEARCH
+  // =============================================
+  getSearchableObjects() {
+    const results = [];
+
+    this.orbitalBodies.forEach((entry, id) => {
+      results.push({
+        id,
+        name: entry.data.name,
+        type: entry.data.type,
+        icon: entry.data.icon || '⚫',
+      });
+    });
+
+    this.satellites.forEach((sat, id) => {
+      results.push({
+        id,
+        name: sat.data.name,
+        type: 'satellite',
+        icon: sat.data.icon || '🛰️',
+      });
+    });
+
+    return results;
+  }
+
+  // =============================================
+  // SAVE / LOAD
+  // =============================================
+  saveUniverse() {
+    const data = {
+      physics: this.physics.serialize(),
+      camera: {
+        x: this.renderer.camera.position.x,
+        y: this.renderer.camera.position.y,
+        z: this.renderer.camera.position.z,
+        tx: this.renderer.controls.target.x,
+        ty: this.renderer.controls.target.y,
+        tz: this.renderer.controls.target.z,
+      },
+      timestamp: Date.now(),
+    };
+
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'cosmos_universe_' + Date.now() + '.json';
+    a.click();
+    URL.revokeObjectURL(url);
+    this.ui?.showToast('Universe saved!', 'success');
+  }
+
+  loadUniverse() {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.json';
+    input.addEventListener('change', (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        try {
+          const data = JSON.parse(ev.target.result);
+          this.physics.deserialize(data.physics);
+          if (data.camera) {
+            this.renderer.camera.position.set(data.camera.x, data.camera.y, data.camera.z);
+            this.renderer.controls.target.set(data.camera.tx, data.camera.ty, data.camera.tz);
+          }
+          this.ui?.showToast('Universe loaded!', 'success');
+          if (this.ui) this.ui.updateObjectList();
+        } catch (err) {
+          this.ui?.showToast('Failed to load universe: ' + err.message, 'error');
+        }
+      };
+      reader.readAsText(file);
+    });
+    input.click();
+  }
+
+  takeScreenshot() {
+    const dataUrl = this.renderer.takeScreenshot();
+    const a = document.createElement('a');
+    a.href = dataUrl;
+    a.download = 'cosmos_screenshot_' + Date.now() + '.png';
+    a.click();
+    this.ui?.showToast('Screenshot saved!', 'success');
+  }
+
+  // =============================================
+  // DRAG
+  // =============================================
+  _updateDrag() {
+    // Already handled in mousemove event
+  }
+
+  // =============================================
+  // HELPERS
+  // =============================================
+  _setLoading(status, percent) {
+    if (this.loadingStatus) this.loadingStatus.textContent = status;
+    if (this.loadingBar) this.loadingBar.style.width = percent + '%';
+  }
+
+  _sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  showToast(msg, type) {
+    if (this.ui) this.ui.showToast(msg, type);
+  }
+}
+
+// =============================================
+// BOOTSTRAP
+// =============================================
+const cosmos = new CosmosX();
+
+// Expose for debugging
+window.cosmos = cosmos;

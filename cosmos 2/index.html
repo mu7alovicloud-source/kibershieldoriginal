@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="COSMOS X — Professional 3D Universe Sandbox. Explore, simulate, and manipulate the universe in real-time with realistic N-body physics, planetary textures, satellites, black holes, and supernovas.">
+  <title>COSMOS X — Professional 3D Universe Sandbox</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/main.css">
+</head>
+<body>
+  <div id="app">
+    <!-- Loading Screen -->
+    <div id="loading-screen">
+      <div class="loading-content">
+        <div class="cosmos-logo">
+          <span class="cosmos-x-text">COSMOS</span>
+          <span class="cosmos-x-accent">X</span>
+        </div>
+        <div class="loading-subtitle">Professional 3D Universe Sandbox</div>
+        <div class="loading-bar-container">
+          <div class="loading-bar" id="loading-bar"></div>
+        </div>
+        <div class="loading-status" id="loading-status">Initializing universe...</div>
+      </div>
+    </div>
+
+    <!-- Main Canvas -->
+    <canvas id="cosmos-canvas"></canvas>
+
+    <!-- Top Bar -->
+    <header id="top-bar">
+      <div class="top-left">
+        <div class="brand">
+          <span class="brand-name">COSMOS</span>
+          <span class="brand-accent">X</span>
+        </div>
+      </div>
+      <div class="top-center">
+        <div class="search-container">
+          <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+          </svg>
+          <input type="text" id="search-input" placeholder="Search stars, planets, satellites..." autocomplete="off">
+          <div id="search-results" class="search-dropdown hidden"></div>
+        </div>
+        <div class="time-controls">
+          <button class="time-btn" id="btn-reverse" title="Reverse Time">⏮</button>
+          <button class="time-btn" id="btn-pause" title="Pause/Play (Space)">⏸</button>
+          <button class="time-btn" id="btn-play" title="Play">▶</button>
+          <div class="time-speed-group">
+            <button class="speed-btn active" id="speed-1" data-speed="1" title="1x">1×</button>
+            <button class="speed-btn" id="speed-10" data-speed="10" title="10x">10×</button>
+            <button class="speed-btn" id="speed-100" data-speed="100" title="100x">100×</button>
+            <button class="speed-btn" id="speed-1000" data-speed="1000" title="1000x">1K×</button>
+            <button class="speed-btn" id="speed-10000" data-speed="10000" title="10000x">10K×</button>
+          </div>
+        </div>
+      </div>
+      <div class="top-right">
+        <button class="icon-btn" id="btn-save" title="Save Universe">💾</button>
+        <button class="icon-btn" id="btn-load" title="Load Universe">📂</button>
+        <button class="icon-btn" id="btn-screenshot" title="Screenshot">📷</button>
+        <button class="icon-btn" id="btn-settings" title="Settings">⚙️</button>
+      </div>
+    </header>
+
+    <!-- Left Panel -->
+    <aside id="left-panel">
+      <nav class="panel-nav">
+        <button class="nav-btn active" data-panel="solar-system" title="Solar System">
+          <span class="nav-icon">🌌</span>
+          <span class="nav-label">System</span>
+        </button>
+        <button class="nav-btn" data-panel="satellites" title="Satellites">
+          <span class="nav-icon">🛰️</span>
+          <span class="nav-label">Satellites</span>
+        </button>
+        <button class="nav-btn" data-panel="spawn" title="Spawn Objects">
+          <span class="nav-icon">✨</span>
+          <span class="nav-label">Spawn</span>
+        </button>
+        <button class="nav-btn" data-panel="galaxies" title="Galaxies">
+          <span class="nav-icon">🌀</span>
+          <span class="nav-label">Galaxies</span>
+        </button>
+        <button class="nav-btn" data-panel="effects" title="Effects">
+          <span class="nav-icon">💥</span>
+          <span class="nav-label">Effects</span>
+        </button>
+      </nav>
+
+      <div class="panel-content">
+        <!-- Solar System Panel -->
+        <div class="sub-panel active" id="panel-solar-system">
+          <div class="panel-title">Solar System</div>
+          <div class="object-list" id="object-list">
+            <!-- Populated by JS -->
+          </div>
+        </div>
+
+        <!-- Satellites Panel -->
+        <div class="sub-panel hidden" id="panel-satellites">
+          <div class="panel-title">Satellites</div>
+          <div class="satellite-filters">
+            <button class="filter-btn active" data-filter="all">All</button>
+            <button class="filter-btn" data-filter="ACTIVE">Active</button>
+            <button class="filter-btn" data-filter="INACTIVE">Inactive</button>
+          </div>
+          <div class="object-list" id="satellite-list">
+            <!-- Populated by JS -->
+          </div>
+        </div>
+
+        <!-- Spawn Panel -->
+        <div class="sub-panel hidden" id="panel-spawn">
+          <div class="panel-title">Spawn Object</div>
+          <div class="spawn-grid">
+            <button class="spawn-btn" data-type="planet" id="spawn-planet">
+              <span class="spawn-icon">🪐</span>
+              <span>Planet</span>
+            </button>
+            <button class="spawn-btn" data-type="moon" id="spawn-moon">
+              <span class="spawn-icon">🌕</span>
+              <span>Moon</span>
+            </button>
+            <button class="spawn-btn" data-type="star" id="spawn-star">
+              <span class="spawn-icon">⭐</span>
+              <span>Star</span>
+            </button>
+            <button class="spawn-btn" data-type="asteroid" id="spawn-asteroid">
+              <span class="spawn-icon">🪨</span>
+              <span>Asteroid</span>
+            </button>
+            <button class="spawn-btn" data-type="comet" id="spawn-comet">
+              <span class="spawn-icon">☄️</span>
+              <span>Comet</span>
+            </button>
+            <button class="spawn-btn" data-type="satellite" id="spawn-satellite">
+              <span class="spawn-icon">🛰️</span>
+              <span>Satellite</span>
+            </button>
+            <button class="spawn-btn spawn-danger" data-type="blackhole" id="spawn-blackhole">
+              <span class="spawn-icon">⚫</span>
+              <span>Black Hole</span>
+            </button>
+            <button class="spawn-btn spawn-galaxy" data-type="galaxy" id="spawn-galaxy">
+              <span class="spawn-icon">🌀</span>
+              <span>Galaxy</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Galaxies Panel -->
+        <div class="sub-panel hidden" id="panel-galaxies">
+          <div class="panel-title">Galaxy Generator</div>
+          <div class="form-group">
+            <label>Type</label>
+            <select id="galaxy-type">
+              <option value="spiral">Spiral</option>
+              <option value="elliptical">Elliptical</option>
+              <option value="irregular">Irregular</option>
+              <option value="cluster">Star Cluster</option>
+              <option value="nebula">Nebula</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Stars: <span id="galaxy-stars-val">50000</span></label>
+            <input type="range" id="galaxy-stars" min="1000" max="200000" value="50000" step="1000">
+          </div>
+          <div class="form-group">
+            <label>Arms: <span id="galaxy-arms-val">4</span></label>
+            <input type="range" id="galaxy-arms" min="2" max="8" value="4" step="1">
+          </div>
+          <div class="form-group">
+            <label>Radius: <span id="galaxy-radius-val">500</span> AU</label>
+            <input type="range" id="galaxy-radius" min="100" max="2000" value="500" step="50">
+          </div>
+          <button class="action-btn full-width" id="btn-generate-galaxy">Generate Galaxy</button>
+        </div>
+
+        <!-- Effects Panel -->
+        <div class="sub-panel hidden" id="panel-effects">
+          <div class="panel-title">Cosmic Events</div>
+          <button class="action-btn danger" id="btn-supernova">💥 Trigger Supernova</button>
+          <button class="action-btn danger" id="btn-blackhole-convert">⚫ Convert to Black Hole</button>
+          <button class="action-btn warning" id="btn-asteroid-storm">🪨 Asteroid Storm</button>
+          <button class="action-btn warning" id="btn-comet-shower">☄️ Comet Shower</button>
+          <button class="action-btn" id="btn-reset-orbits">🔄 Reset Orbits</button>
+          <button class="action-btn danger" id="btn-destroy-planet">💀 Destroy Planet</button>
+
+          <div class="panel-title" style="margin-top:16px">Visual Settings</div>
+          <div class="toggle-row">
+            <span>Orbit Lines</span>
+            <label class="toggle">
+              <input type="checkbox" id="toggle-orbits" checked>
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div class="toggle-row">
+            <span>Bloom Effect</span>
+            <label class="toggle">
+              <input type="checkbox" id="toggle-bloom" checked>
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div class="toggle-row">
+            <span>Atmosphere</span>
+            <label class="toggle">
+              <input type="checkbox" id="toggle-atmosphere" checked>
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div class="toggle-row">
+            <span>Labels</span>
+            <label class="toggle">
+              <input type="checkbox" id="toggle-labels" checked>
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div class="toggle-row">
+            <span>Grid</span>
+            <label class="toggle">
+              <input type="checkbox" id="toggle-grid">
+              <span class="slider"></span>
+            </label>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Right Inspector Panel -->
+    <aside id="right-panel" class="hidden">
+      <div class="inspector-header">
+        <div class="inspector-title" id="inspector-title">Select an Object</div>
+        <button class="close-btn" id="inspector-close">✕</button>
+      </div>
+      <div class="inspector-body" id="inspector-body">
+        <!-- Populated by JS -->
+      </div>
+      <div class="inspector-actions" id="inspector-actions">
+        <!-- Populated by JS -->
+      </div>
+    </aside>
+
+    <!-- Bottom Bar -->
+    <footer id="bottom-bar">
+      <div class="bottom-left">
+        <span class="sim-info" id="sim-date">Jan 1, 2000 12:00:00</span>
+        <span class="sim-separator">|</span>
+        <span class="sim-info" id="sim-speed-display">1×</span>
+      </div>
+      <div class="bottom-center">
+        <div class="timeline-container">
+          <div class="timeline-track">
+            <div class="timeline-thumb" id="timeline-thumb"></div>
+          </div>
+        </div>
+      </div>
+      <div class="bottom-right">
+        <span class="perf-info" id="fps-display">60 FPS</span>
+        <span class="sim-separator">|</span>
+        <span class="perf-info" id="body-count">0 bodies</span>
+        <span class="sim-separator">|</span>
+        <span class="perf-info" id="camera-distance">0 AU</span>
+      </div>
+    </footer>
+
+    <!-- Object Labels Container -->
+    <div id="labels-container"></div>
+
+    <!-- Context Menu -->
+    <div id="context-menu" class="hidden">
+      <div class="ctx-item" id="ctx-focus">Focus Camera</div>
+      <div class="ctx-item" id="ctx-inspect">Inspect</div>
+      <div class="ctx-item" id="ctx-edit">Edit Properties</div>
+      <div class="ctx-separator"></div>
+      <div class="ctx-item danger" id="ctx-delete">Delete Object</div>
+      <div class="ctx-item danger" id="ctx-destroy">Destroy (Physics)</div>
+    </div>
+
+    <!-- Notification Toast -->
+    <div id="toast-container"></div>
+
+    <!-- Settings Modal -->
+    <div id="settings-modal" class="modal-overlay hidden">
+      <div class="modal">
+        <div class="modal-title">⚙️ COSMOS X Settings & Shortcuts</div>
+        <div style="margin-bottom:16px;">
+          <div class="panel-title" style="margin-bottom:8px;">Keyboard Shortcuts</div>
+          <div class="shortcuts-grid">
+            <span class="key">SPACE</span><span>Pause / Resume Simulation</span>
+            <span class="key">1 - 5</span><span>Set Time Scale (1x to 10000x)</span>
+            <span class="key">F</span><span>Focus Camera on Selected Object</span>
+            <span class="key">Shift + Drag</span><span>Grab & Throw Object with Momentum</span>
+            <span class="key">Double Click</span><span>Smooth Fly-To Target</span>
+            <span class="key">G</span><span>Spawn Planet</span>
+            <span class="key">B</span><span>Spawn Black Hole</span>
+            <span class="key">S</span><span>Trigger Supernova</span>
+            <span class="key">DELETE</span><span>Remove Selected Object</span>
+            <span class="key">ESC</span><span>Deselect / Close Panels</span>
+          </div>
+        </div>
+        <div style="margin-bottom:16px;">
+          <div class="panel-title" style="margin-bottom:8px;">Engine Settings</div>
+          <div class="toggle-row">
+            <span>Physics Accuracy</span>
+            <select id="setting-substeps" style="width:110px;">
+              <option value="2">2 Substeps</option>
+              <option value="4" selected>4 Substeps</option>
+              <option value="8">8 Substeps</option>
+            </select>
+          </div>
+        </div>
+        <button class="action-btn full-width" id="modal-close-btn" style="text-align:center;">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Three.js + Addons via Local Vendor Modules (100% Offline Compatible) -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "./js/vendor/three.module.js",
+      "three/addons/": "./js/vendor/addons/"
+    }
+  }
+  </script>
+
+  <!-- Startup Watchdog Failsafe -->
+  <script>
+    window.addEventListener('DOMContentLoaded', () => {
+      // 3-second watchdog timer to guarantee user never gets stuck on loading screen
+      setTimeout(() => {
+        const loadingScreen = document.getElementById('loading-screen');
+        if (loadingScreen && !loadingScreen.classList.contains('fade-out')) {
+          console.warn('COSMOS X Watchdog: Auto-dismissing loading screen after timeout.');
+          loadingScreen.classList.add('fade-out');
+          setTimeout(() => { loadingScreen.style.display = 'none'; }, 800);
+        }
+      }, 3000);
+    });
+  </script>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
